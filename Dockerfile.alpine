@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=alpine:3.24
+
+FROM ${BASE_IMAGE} AS source
+RUN apk add --no-cache gpgv
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://github.com/tjko/jpegoptim/releases/download/v${VERSION}/jpegoptim-${VERSION}.tar.gz /src/
+ADD https://github.com/tjko/jpegoptim/releases/download/v${VERSION}/jpegoptim-${VERSION}.tar.gz.asc /src/
+# Timo Kokkonen's signing key, fingerprint 9168 CD7A 2F0A AB06 79D0 9BBA 9D08 A80C ED90 8D6A
+COPY keys/tjko.gpg /tmp/tjko.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/tjko.gpg "jpegoptim-${VERSION}.tar.gz.asc" "jpegoptim-${VERSION}.tar.gz"; \
+    mkdir jpegoptim; \
+    tar -xzf "jpegoptim-${VERSION}.tar.gz" -C jpegoptim --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+RUN apk add --no-cache \
+      build-base \
+      libjpeg-turbo-dev \
+      scanelf
+COPY --link --from=source /src/jpegoptim /src/jpegoptim
+WORKDIR /src/jpegoptim
+ARG JOBS
+# jpegoptim --version prints the date it was compiled. It is taken from the
+# release's source files, so every build of a release prints the same date.
+RUN set -eu; \
+    SOURCE_DATE_EPOCH="$(stat -c %Y jpegoptim.c)"; \
+    export SOURCE_DATE_EPOCH; \
+    ./configure --prefix=/usr/local; \
+    make -j"${JOBS:-$(nproc)}"; \
+    make install DESTDIR=/out; \
+    strip --strip-unneeded /out/usr/local/bin/jpegoptim; \
+    rm -rf /out/usr/local/share/man
+
+ARG BASE_IMAGE
+ARG VERSION
+# runtime-deps lists the so: names the binary needs, plus the packages in
+# runtime-deps.alpine.
+RUN --mount=type=bind,source=runtime-deps.alpine,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    meta=/out/usr/local/share/randomcontainers/jpegoptim; \
+    mkdir -p "$meta/licenses"; \
+    cp COPYRIGHT LICENSE "$meta/licenses/"; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://github.com/tjko/jpegoptim/releases/download/v${VERSION}/jpegoptim-${VERSION}.tar.gz" \
+      "https://github.com/tjko/jpegoptim/releases/download/v${VERSION}/jpegoptim-${VERSION}.tar.gz.asc" \
+      "https://github.com/randomcontainers/jpegoptim/releases/tag/v${VERSION}" \
+      > "$meta/source"; \
+    /out/usr/local/bin/jpegoptim --version > /tmp/jpegoptim-version; \
+    grep -q "^jpegoptim v${VERSION} " /tmp/jpegoptim-version; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(cc --version | head -n 1)"; \
+      sed -n 's/^  \$ \(\.\/configure .*\)/\1/p' config.log; \
+      cat /tmp/jpegoptim-version; \
+    } > "$meta/buildinfo"; \
+    scanelf --needed --nobanner --format '%n#p' --recursive /out/usr/local | tr ',' '\n' | sort -u > /tmp/needed; \
+    while read -r so; do \
+      if [ -n "$so" ] && [ -z "$(find /out -name "$so" -print -quit)" ]; then echo "so:$so"; fi; \
+    done < /tmp/needed > /tmp/elf-deps; \
+    test -s /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    xargs apk add --no-cache ca-certificates tini < /usr/local/share/randomcontainers/jpegoptim/runtime-deps; \
+    addgroup -g 1000 app; \
+    adduser -D -u 1000 -G app app; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "jpegoptim"]
+CMD ["--help"]
