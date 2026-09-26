@@ -1,0 +1,120 @@
+name: jpegoptim
+title: jpegoptim
+summary: Makes JPEG files smaller, losslessly or by recompressing them to a maximum quality or file size, and can strip their metadata.
+homepage: https://github.com/tjko/jpegoptim
+license: GPL-3.0-or-later
+source-release: true
+upstream:
+  source: github-release
+  repository: tjko/jpegoptim
+  # Release tags look like v1.5.6.
+  tag-pattern: '^v(\d+\.\d+\.\d+)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 1.5.6
+  artifact:
+    url: https://github.com/tjko/jpegoptim/releases/download/v{version}/jpegoptim-{version}.tar.gz
+    signature: https://github.com/tjko/jpegoptim/releases/download/v{version}/jpegoptim-{version}.tar.gz.asc
+    sha256: 661a808dfffa933d78c6beb47a2937d572b9f03e94cbaaab3d4c0d72f410e9be
+image:
+  entrypoint: [jpegoptim]
+  cmd: [--help]
+test:
+  - |
+    jpegoptim --version > version.txt
+    head -n 1 version.txt | grep -Fq "jpegoptim v$VERSION "
+    grep -q '^libjpeg version: ' version.txt
+  - |
+    # A 16x16 baseline JPEG at quality 95 with the standard Huffman tables, an
+    # Exif block and a comment.
+    base64 -d > sample.jpg <<'EOF'
+    /9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAEAAAAAAAD/
+    2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoK
+    BggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoK
+    CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr//gAMdGVzdCBpbWFnZf/AABEIABAAEAMBIgACEQEDEQH/
+    xAAfAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgv/xAC1EAACAQMDAgQDBQUEBAAAAX0BAgMA
+    BBEFEiExQQYTUWEHInEUMoGRoQgjQrHBFVLR8CQzYnKCCQoWFxgZGiUmJygpKjQ1Njc4OTpDREVG
+    R0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0
+    tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4eLj5OXm5+jp6vHy8/T19vf4+fr/xAAfAQADAQEBAQEB
+    AQEBAAAAAAAAAQIDBAUGBwgJCgv/xAC1EQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2Fx
+    EyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZ
+    WmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TF
+    xsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/APg/4R/sky3uoiV9
+    KjjU7GntsAyOqDjaPubiFZgQASM4GD831n8NP2P4oIQ99DDDKpWVQyMxQgsd2c7cklcIC2QGxwTX
+    0h8Fv2QraIQJbaMrhv8AVvFYopBZCocgvuA/d5wchh2JYCvqP4Vfsk6eY0jhsJg4VQ88tmvzPnZt
+    QFCVGVBAyijGPl5r7Dijxbw1PDKUmm2rtvW3l67ttuyXe5z/AEZ/pBNuiva6adT/2Q==
+    EOF
+    cp sample.jpg lossless.jpg
+    jpegoptim --strip-all lossless.jpg > lossless.txt
+    grep -Fq 'lossless.jpg 16x16 24bit N JFIF,Exif,COM [OK] ' lossless.txt
+    grep -q ', optimized\.$' lossless.txt
+    test "$(wc -c < lossless.jpg)" -lt "$(wc -c < sample.jpg)"
+    # A second pass finds no markers and nothing left to gain.
+    jpegoptim --noaction lossless.jpg > again.txt
+    grep -Fq 'lossless.jpg 16x16 24bit N  [OK] ' again.txt
+    jpegoptim --csv --noaction lossless.jpg | awk -F, '$5 == $6 && $8 == "skipped" { ok = 1 } END { exit !ok }'
+  - |
+    # sample.jpg and lossless.jpg are from the previous test.
+    cp sample.jpg lossy.jpg
+    jpegoptim --quiet --strip-all --max=80 lossy.jpg
+    test "$(wc -c < lossy.jpg)" -lt "$(wc -c < lossless.jpg)"
+    # --dest writes the result to another directory and leaves the input alone.
+    cp sample.jpg input.jpg
+    mkdir dest
+    jpegoptim --quiet --strip-all --max=80 --dest=dest input.jpg
+    cmp input.jpg sample.jpg
+    cmp dest/input.jpg lossy.jpg
+    # With --stdout the report goes to stderr.
+    jpegoptim --stdin --stdout --strip-all < sample.jpg > stdout.jpg 2> stdout.txt
+    cmp stdout.jpg lossless.jpg
+    grep -q '^stdin 16x16 24bit N .*, optimized\.$' stdout.txt
+  - |
+    cp lossless.jpg progressive.jpg
+    # A progressive file this small is larger, so --force keeps it anyway.
+    jpegoptim --quiet --force --all-progressive progressive.jpg
+    test "$(jpegoptim --csv --noaction progressive.jpg | cut -d, -f2-4)" = '16x16,24bit,P'
+    printf 'not a JPEG file\n' > broken.jpg
+    if jpegoptim broken.jpg > broken.txt 2>&1; then
+      echo "jpegoptim accepted a file that is not a JPEG" >&2
+      exit 1
+    fi
+    grep -Fq '[ERROR]' broken.txt
+    test "$(cat broken.jpg)" = 'not a JPEG file'
+examples:
+  - title: Optimize every JPEG in the current directory losslessly and strip their metadata
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/jpegoptim --strip-all *.jpg
+  - title: Recompress photos that were saved above quality 85
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/jpegoptim --max=85 --strip-all *.jpg
+  - title: Optimize a JPEG from standard input to standard output
+    command: docker run --rm -i ghcr.io/randomcontainers/jpegoptim --stdin --stdout --strip-all < photo.jpg > photo-small.jpg
+  - title: Rotate and resize a photo, then optimize it and keep its color profile (default image)
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint sh ghcr.io/randomcontainers/jpegoptim -c 'magick photo.jpg -auto-orient -resize 1600x1600 web.jpg && jpegoptim --max=85 --strip-all --keep-icc web.jpg'
+combos:
+  - with: [imagemagick]
+    default: true
+    base: imagemagick
+    summary: jpegoptim with ImageMagick, for resizing, rotating or converting images before optimizing them.
+    test:
+      - |
+        # A JPEG with the standard Huffman tables and a comment, as cameras write them.
+        magick -size 320x240 plasma: -quality 92 -define jpeg:optimize-coding=false -set comment 'test image' photo.jpg
+        test "$(magick photo.jpg -format '%c' info:)" = 'test image'
+        cp photo.jpg lossless.jpg
+        jpegoptim --quiet --strip-all lossless.jpg
+        test "$(wc -c < lossless.jpg)" -lt "$(wc -c < photo.jpg)"
+        test -z "$(magick lossless.jpg -format '%c' info:)"
+        # Lossless mode keeps every pixel, also when it makes the file progressive.
+        pixels="$(magick photo.jpg -format '%#' info:)"
+        test "$(magick lossless.jpg -format '%#' info:)" = "$pixels"
+        cp photo.jpg progressive.jpg
+        jpegoptim --quiet --strip-all --all-progressive progressive.jpg
+        test "$(jpegoptim --csv --noaction progressive.jpg | cut -d, -f4)" = P
+        test "$(magick progressive.jpg -format '%#' info:)" = "$pixels"
+      - |
+        # Resize with ImageMagick, then cap the quality with jpegoptim.
+        magick -size 320x240 plasma: -quality 95 photo.jpg
+        magick photo.jpg -resize 50% -quality 95 web.jpg
+        test "$(magick web.jpg -format '%Q' info:)" -gt 80
+        jpegoptim --quiet --strip-all --max=80 web.jpg
+        test "$(magick web.jpg -format '%m %wx%h' info:)" = 'JPEG 160x120'
+        test "$(magick web.jpg -format '%Q' info:)" -le 80
