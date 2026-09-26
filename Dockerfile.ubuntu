@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS source
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gpgv \
+ && rm -rf /var/lib/apt/lists/*
+ARG VERSION
+ARG SOURCE_SHA256
+ADD --checksum=sha256:${SOURCE_SHA256} https://github.com/tjko/jpegoptim/releases/download/v${VERSION}/jpegoptim-${VERSION}.tar.gz /src/
+ADD https://github.com/tjko/jpegoptim/releases/download/v${VERSION}/jpegoptim-${VERSION}.tar.gz.asc /src/
+# Timo Kokkonen's signing key, fingerprint 9168 CD7A 2F0A AB06 79D0 9BBA 9D08 A80C ED90 8D6A
+COPY keys/tjko.gpg /tmp/tjko.gpg
+WORKDIR /src
+RUN set -eu; \
+    gpgv --keyring /tmp/tjko.gpg "jpegoptim-${VERSION}.tar.gz.asc" "jpegoptim-${VERSION}.tar.gz"; \
+    mkdir jpegoptim; \
+    tar -xzf "jpegoptim-${VERSION}.tar.gz" -C jpegoptim --strip-components=1
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+# The base image's own packages are recorded first so they can be left out of
+# runtime-deps; every image built from this list starts from the same base.
+RUN dpkg-query -W -f '${Package}\n' | sort -u > /tmp/base-packages \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential \
+      libjpeg-turbo8-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY --link --from=source /src/jpegoptim /src/jpegoptim
+WORKDIR /src/jpegoptim
+ARG JOBS
+# jpegoptim --version prints the date it was compiled. It is taken from the
+# release's source files, so every build of a release prints the same date.
+RUN set -eu; \
+    SOURCE_DATE_EPOCH="$(stat -c %Y jpegoptim.c)"; \
+    export SOURCE_DATE_EPOCH; \
+    ./configure --prefix=/usr/local; \
+    make -j"${JOBS:-$(nproc)}"; \
+    make install DESTDIR=/out; \
+    strip --strip-unneeded /out/usr/local/bin/jpegoptim; \
+    rm -rf /out/usr/local/share/man
+
+ARG BASE_IMAGE
+ARG VERSION
+# runtime-deps lists the packages that own the libraries the binary loads,
+# minus the base image's packages, plus the packages in runtime-deps.ubuntu.
+RUN --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    set -eu; \
+    meta=/out/usr/local/share/randomcontainers/jpegoptim; \
+    mkdir -p "$meta/licenses"; \
+    cp COPYRIGHT LICENSE "$meta/licenses/"; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://github.com/tjko/jpegoptim/releases/download/v${VERSION}/jpegoptim-${VERSION}.tar.gz" \
+      "https://github.com/tjko/jpegoptim/releases/download/v${VERSION}/jpegoptim-${VERSION}.tar.gz.asc" \
+      "https://github.com/randomcontainers/jpegoptim/releases/tag/v${VERSION}" \
+      > "$meta/source"; \
+    /out/usr/local/bin/jpegoptim --version > /tmp/jpegoptim-version; \
+    grep -q "^jpegoptim v${VERSION} " /tmp/jpegoptim-version; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "compiler: $(cc --version | head -n 1)"; \
+      sed -n 's/^  \$ \(\.\/configure .*\)/\1/p' config.log; \
+      cat /tmp/jpegoptim-version; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+      | xargs -0 ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | sort -u | comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    test -s /tmp/elf-deps; \
+    sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+COPY --link --from=build /out/usr/local/ /usr/local/
+RUN set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /usr/local/share/randomcontainers/jpegoptim/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    install -d -m 1777 /work /cache
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "jpegoptim"]
+CMD ["--help"]
