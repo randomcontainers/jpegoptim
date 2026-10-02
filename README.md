@@ -13,8 +13,6 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
   ghcr.io/randomcontainers/jpegoptim --strip-all *.jpg
 ```
 
-The same images can also be pulled as `randomcontainers.com/jpegoptim`.
-
 jpegoptim replaces each file, and only when the result is smaller. To keep the originals, write the results to another directory with `--dest`, which must exist:
 
 ```sh
